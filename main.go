@@ -6,81 +6,101 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 	"strings"
+	"time"
 )
 
 const (
 	repoObjectsDir = "repo_objects"
 	repoCommitsDir = "repo_commits"
-	currentSnapshotFile = ".hunter_snapshot"
+	hunterIndexFile = ".hunter_index"
 )
 
-func addToRepository(filePath string) (string, error) {
+func addToIndex(filePath string) (string, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return "", fmt.Errorf("erro ao ler arquivo no diretório de trabalho: %w", err)
+		return "", fmt.Errorf("erro ao ler arquivo '%s' no diretório de trabalho: %w", filePath, err)
 	}
-	
+
 	hasher := sha1.New()
 	hasher.Write(content)
 	hash := hex.EncodeToString(hasher.Sum(nil))
 
-	repoObjectsDir := "repo_objects"
 	err = os.MkdirAll(repoObjectsDir, 0755)
 	if err != nil {
-		return "", fmt.Errorf("erro ao criar diretório do repositório: %w", err)
+		return "", fmt.Errorf("erro ao criar diretório de objetos do repositório: %w", err)
 	}
 
-	objectPath := filepath.Join(repoObjectsDir, hash) 
-	err = os.WriteFile(objectPath, content, 0644)
+	objectPath := filepath.Join(repoObjectsDir, hash)
+	if _, err := os.Stat(objectPath); os.IsNotExist(err) {
+		err = os.WriteFile(objectPath, content, 0644)
+		if err != nil {
+			return "", fmt.Errorf("erro ao salvar objeto blob no repositório: %w", err)
+		}
+		fmt.Printf("Conteúdo do arquivo '%s' salvo como blob com hash: %s\n", filePath, hash)
+	} else if err != nil {
+		return "", fmt.Errorf("erro ao verificar objeto blob: %w", err)
+	} else {
+		fmt.Printf("Blob para '%s' (hash: %s) já existe no repositório. Não regravado\n", filePath, hash)
+	}
+
+	indexEntries := make(map[string]string)
+
+	existingIndexContent, err := os.ReadFile(hunterIndexFile)
+	if err == nil {
+		lines := strings.Split(string(existingIndexContent), "\n")
+		for _, line := range lines {
+			parts := strings.Fields(line)
+			if len(parts) == 2 {
+				indexEntries[parts[1]] = parts[0]
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("erro ao ler o arquivo de índice: %w", err)
+	}
+
+	indexEntries[filePath] = hash
+	var newIndexContent strings.Builder
+	for path, h := range indexEntries {
+		newIndexContent.WriteString(fmt.Sprintf("%s %s\n", h, path))
+	}
+
+	err = os.WriteFile(hunterIndexFile, []byte(newIndexContent.String()), 0644)
 	if err != nil {
-		return "", fmt.Errorf("erro ao salvar objeto no repositório: %w", err)
+		return "", fmt.Errorf("erro ao atualizar o índice: %w", err)
 	}
 
-	fmt.Printf("Conteúdo de '%s' adicionado ao 'repositório' com hash: %s\n", filePath, hash)
-
-	snapshotEntry := fmt.Sprintf("%s %s\n", hash, filePath)
-	f, err := os.OpenFile(currentSnapshotFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return "", fmt.Errorf("erro ao abrir arquivo de snapshot: %w", err)
-	}
-	defer f.Close()	
-	if _, err := f.WriteString(snapshotEntry); err != nil {
-		return "", fmt.Errorf("erro ao escrever no arquivo de snapshot: %w", err)
-	}
-
+	fmt.Printf("Arquivo '%s' (hash: %s) adicionado/atualizado no índice\n", filePath, hash)
 	return hash, nil
 }
 
 func commitChanges(message string) error {
-	snapshotContent, err := os.ReadFile(currentSnapshotFile)
-	if os.IsNotExist(err) || len(snapshotContent) == 0 {
-		return fmt.Errorf("não há arquivos para comitar. Use 'hunter add <arquivo>' primeiro.")
+	indexContent, err := os.ReadFile(hunterIndexFile)
+	if os.IsNotExist(err) || len(strings.TrimSpace(string(indexContent))) == 0 {
+		return fmt.Errorf("não há arquivos na área de staging para commitar. Use 'hunter add <arquivo>' primeiro")
 	}
 	if err != nil {
-		return fmt.Errorf("erro ao ler snapshot atual: %w", err)
+		return fmt.Errorf("erro ao ler o índice: %w", err)
 	}
 
 	commitId := sha1.New()
 	commitId.Write([]byte(message))
-	commitId.Write(snapshotContent)
-
+	commitId.Write(indexContent)
 	commitId.Write([]byte(time.Now().Format(time.RFC3339Nano)))
 
 	commitHash := hex.EncodeToString(commitId.Sum(nil))
 
 	commitContent := fmt.Sprintf(
 		"commit %s\n"+
-		"data: %s\n"+
+		"Date: %s\n"+
 		"\n"+
 		"	%s\n"+
 		"\n"+
-		"Arquivos:\n%s",
+		"Staged Files (from index):\n%s",
 		commitHash,
-		time.Now().Format(time.RFC3339Nano),
+		time.Now().Format(time.RFC3339),
 		message,
-		string(snapshotContent),
+		string(indexContent),
 	)
 
 	err = os.MkdirAll(repoCommitsDir, 0755)
@@ -91,14 +111,14 @@ func commitChanges(message string) error {
 	commitPath := filepath.Join(repoCommitsDir, commitHash)
 	err = os.WriteFile(commitPath, []byte(commitContent), 0644)
 	if err != nil {
-		return fmt.Errorf("erro ao salvar objeto commmit: %w", err)
+		return fmt.Errorf("erro ao salvar objeto commit: %w", err)
 	}
 
-	fmt.Printf("Commit '%s' criado com sucesso! Hash: %s\n", message, commitHash)
+	fmt.Printf("Commit '%s' criado com sucesso. Hash: %s\n", message, commitHash)
 
-	err = os.WriteFile(currentSnapshotFile, []byte{}, 0644)
+	err = os.WriteFile(hunterIndexFile, []byte{}, 0644)
 	if err != nil {
-		fmt.Printf("Aviso: erro ao limpar arquivo de snapshot: %v\n", err)
+		fmt.Printf("Aviso: erro ao limpar o arquivo de índice: %v\n", err)
 	}
 
 	return nil
@@ -117,7 +137,7 @@ func main() {
 		fmt.Println("Os comandos são:")
 		fmt.Println()
 		fmt.Println("	add		Adiciona o arquivo para o repositório")
-		fmt.Println("	commit		Cria um novo commit com os arquivos no 'snapshot'")
+		fmt.Println("	commit		Cria um novo commit com os arquivos na área de staging")
 		fmt.Println()
 		return
 	}
@@ -131,7 +151,7 @@ func main() {
 			return
 		}
 		filePath := args[1]
-		_, err := addToRepository(filePath)
+		_, err := addToIndex(filePath)
 		if err != nil {
 			fmt.Println("Erro:", err)
 		}
