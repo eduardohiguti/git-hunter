@@ -11,12 +11,68 @@ import (
 )
 
 const (
-	repoObjectsDir = "repo_objects"
-	repoCommitsDir = "repo_commits"
-	hunterIndexFile = ".hunter_index"
+	hunterRootDir = ".hunter"
+	repoObjectsDir = "OBJECTS"
+	repoCommitsDir = "COMMITS"
+	hunterIndexFile = "INDEX"
 )
 
+func getObjectsDirPath() string {
+	return filepath.Join(hunterRootDir, repoObjectsDir)
+}
+
+func getCommitsDirPath() string {
+	return filepath.Join(hunterRootDir, repoCommitsDir)
+}
+
+func getIndexPath() string {
+	return filepath.Join(hunterRootDir, hunterIndexFile)
+}
+
+func initRepo() error {
+	fmt.Printf("Inicializando repositório Hunter em '%s'\n", hunterRootDir)
+
+	err := os.MkdirAll(hunterRootDir, 0755)
+	if err != nil {
+		return fmt.Errorf("erro ao criar diretório raiz do Hunter '%s': %w", hunterRootDir, err)
+	}
+
+	err = os.MkdirAll(getObjectsDirPath(), 0755)
+	if err != nil {
+		return fmt.Errorf("erro ao criar diretório de objetos '%s': %w", getObjectsDirPath(), err)
+	}
+
+	err = os.MkdirAll(getCommitsDirPath(), 0755)
+	if err != nil {
+		return fmt.Errorf("erro ao criar diretório de commits '%s': %w", getCommitsDirPath(), err)
+	}
+
+	indexPath := getIndexPath()
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		_, err := os.Create(indexPath)
+		if err != nil {
+			return fmt.Errorf("erro ao criar arquivo de índice '%s': %w", indexPath, err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("erro ao verificar arquivo de índice '%s': %w", indexPath, err)
+	}
+
+	fmt.Println("Repositório Hunter inicializado com sucesso!")
+	return nil
+}
+
+func checkRepoInitialized() error {
+	if _, err := os.Stat(hunterRootDir); os.IsNotExist(err) {
+		return fmt.Errorf("repositório Hunter não inicializado. Use 'hunter init' primeiro")
+	}
+	return nil
+}
+
 func addToIndex(filePath string) (string, error) {
+	if err := checkRepoInitialized(); err != nil {
+		return "", err
+	}
+
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", fmt.Errorf("erro ao ler arquivo '%s' no diretório de trabalho: %w", filePath, err)
@@ -26,27 +82,23 @@ func addToIndex(filePath string) (string, error) {
 	hasher.Write(content)
 	hash := hex.EncodeToString(hasher.Sum(nil))
 
-	err = os.MkdirAll(repoObjectsDir, 0755)
-	if err != nil {
-		return "", fmt.Errorf("erro ao criar diretório de objetos do repositório: %w", err)
-	}
-
-	objectPath := filepath.Join(repoObjectsDir, hash)
+	objectPath := filepath.Join(getObjectsDirPath(), hash)
 	if _, err := os.Stat(objectPath); os.IsNotExist(err) {
 		err = os.WriteFile(objectPath, content, 0644)
 		if err != nil {
-			return "", fmt.Errorf("erro ao salvar objeto blob no repositório: %w", err)
+			return "", fmt.Errorf("erro ao salvar objeto blob no repositório '%s': %w", objectPath,err)
 		}
 		fmt.Printf("Conteúdo do arquivo '%s' salvo como blob com hash: %s\n", filePath, hash)
 	} else if err != nil {
-		return "", fmt.Errorf("erro ao verificar objeto blob: %w", err)
+		return "", fmt.Errorf("erro ao verificar objeto blob '%s': %w", objectPath,err)
 	} else {
 		fmt.Printf("Blob para '%s' (hash: %s) já existe no repositório. Não regravado\n", filePath, hash)
 	}
 
+	indexPath := getIndexPath()
 	indexEntries := make(map[string]string)
 
-	existingIndexContent, err := os.ReadFile(hunterIndexFile)
+	existingIndexContent, err := os.ReadFile(indexPath)
 	if err == nil {
 		lines := strings.Split(string(existingIndexContent), "\n")
 		for _, line := range lines {
@@ -56,31 +108,37 @@ func addToIndex(filePath string) (string, error) {
 			}
 		}
 	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("erro ao ler o arquivo de índice: %w", err)
+		return "", fmt.Errorf("erro ao ler o arquivo de índice '%s': %w", indexPath,err)
 	}
 
 	indexEntries[filePath] = hash
+
 	var newIndexContent strings.Builder
 	for path, h := range indexEntries {
 		newIndexContent.WriteString(fmt.Sprintf("%s %s\n", h, path))
 	}
 
-	err = os.WriteFile(hunterIndexFile, []byte(newIndexContent.String()), 0644)
+	err = os.WriteFile(indexPath, []byte(newIndexContent.String()), 0644)
 	if err != nil {
-		return "", fmt.Errorf("erro ao atualizar o índice: %w", err)
+		return "", fmt.Errorf("erro ao atualizar o índice '%s': %w", indexPath,err)
 	}
 
-	fmt.Printf("Arquivo '%s' (hash: %s) adicionado/atualizado no índice\n", filePath, hash)
+	fmt.Printf("Arquivo '%s' (hash: %s) adicionado/atualizado no índice (Staging Area)\n", filePath, hash)
 	return hash, nil
 }
 
 func commitChanges(message string) error {
-	indexContent, err := os.ReadFile(hunterIndexFile)
+	if err := checkRepoInitialized(); err != nil {
+		return err
+	}
+
+	indexPath := getIndexPath()
+	indexContent, err := os.ReadFile(indexPath)
 	if os.IsNotExist(err) || len(strings.TrimSpace(string(indexContent))) == 0 {
 		return fmt.Errorf("não há arquivos na área de staging para commitar. Use 'hunter add <arquivo>' primeiro")
 	}
 	if err != nil {
-		return fmt.Errorf("erro ao ler o índice: %w", err)
+		return fmt.Errorf("erro ao ler o índice '%s': %w", indexPath, err)
 	}
 
 	commitId := sha1.New()
@@ -92,33 +150,28 @@ func commitChanges(message string) error {
 
 	commitContent := fmt.Sprintf(
 		"commit %s\n"+
-		"Date: %s\n"+
+		"date: %s\n"+
 		"\n"+
 		"	%s\n"+
 		"\n"+
-		"Staged Files (from index):\n%s",
+		"arquivos staged (do índice):\n%s",
 		commitHash,
 		time.Now().Format(time.RFC3339),
 		message,
 		string(indexContent),
 	)
 
-	err = os.MkdirAll(repoCommitsDir, 0755)
-	if err != nil {
-		return fmt.Errorf("erro ao criar diretório de commits: %w", err)
-	}
-
-	commitPath := filepath.Join(repoCommitsDir, commitHash)
+	commitPath := filepath.Join(getCommitsDirPath(), commitHash)
 	err = os.WriteFile(commitPath, []byte(commitContent), 0644)
 	if err != nil {
-		return fmt.Errorf("erro ao salvar objeto commit: %w", err)
+		return fmt.Errorf("erro ao salvar objeto commit em '%s': %w", commitPath, err)
 	}
 
 	fmt.Printf("Commit '%s' criado com sucesso. Hash: %s\n", message, commitHash)
 
-	err = os.WriteFile(hunterIndexFile, []byte{}, 0644)
+	err = os.WriteFile(indexPath, []byte{}, 0644)
 	if err != nil {
-		fmt.Printf("Aviso: erro ao limpar o arquivo de índice: %v\n", err)
+		fmt.Printf("Aviso: erro ao limpar o arquivo de índice '%s': %v\n", indexPath, err)
 	}
 
 	return nil
@@ -136,8 +189,9 @@ func main() {
 		fmt.Println()
 		fmt.Println("Os comandos são:")
 		fmt.Println()
-		fmt.Println("	add		Adiciona o arquivo para o repositório")
-		fmt.Println("	commit		Cria um novo commit com os arquivos na área de staging")
+		fmt.Println("	init				Inicializa um novo repositório Hunter")
+		fmt.Println("	add				Adiciona o arquivo à área de staging")
+		fmt.Println("	commit \"<mensagem>\"		Cria um novo commit com os arquivos na área de staging")
 		fmt.Println()
 		return
 	}
@@ -145,6 +199,11 @@ func main() {
 	switch args[0] {
 	case "oi":
 		fmt.Println("oi")
+	case "init":
+		err := initRepo()
+		if err != nil {
+			fmt.Println("Erro:", err)
+		}
 	case "add":
 		if len(args) < 2 {
 			fmt.Println("Uso: add <caminho-do-arquivo>")
