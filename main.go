@@ -86,10 +86,10 @@ func hashAndSaveObject(filePath string) (string, error) {
 		err = os.WriteFile(objectPath, content, 0644)
 		if err != nil {
 			return "", fmt.Errorf("erro ao salvar objeto %s: %w", objectPath, err)
-		} else if err != nil {
+		} 
+	} else if err != nil {
 			return "", fmt.Errorf("erro ao verificar objeto %s: %w", objectPath, err)
 		}
-	}
 
 	return hash, nil
 }
@@ -99,11 +99,21 @@ func addToIndex(filePath string) (string, error) {
 		return "", err
 	}
 
-	hash, err := hashAndSaveObject(filePath)
+	rootDir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("erro ao ober o diretório de trabalho: %w", err)
+	}
+
+	relativePath, err := filepath.Rel(rootDir, filePath)
+	if err != nil {
+		return "", fmt.Errorf("erro ao calcular o caminho relativo para %s: %w", filePath, err)
+	}
+
+	hash, err := hashAndSaveObject(relativePath)
 	if err != nil {
 		return "", err
 	}
-	fmt.Printf("%s salvo com hash: %s\n", filePath, hash)
+	fmt.Printf("%s salvo com hash: %s\n", relativePath, hash)
 
 	indexPath := getIndexPath()
 	indexEntries := make(map[string]string)
@@ -112,7 +122,7 @@ func addToIndex(filePath string) (string, error) {
 	if err == nil {
 		lines := strings.Split(string(existingIndexContent), "\n")
 		for _, line := range lines {
-			parts := strings.Fields(line)
+			parts := strings.SplitN(line, "\t", 2)
 			if len(parts) == 2 {
 				indexEntries[parts[1]] = parts[0]
 			}
@@ -121,11 +131,11 @@ func addToIndex(filePath string) (string, error) {
 		return "", fmt.Errorf("erro ao ler o arquivo do índice '%s': %w", indexPath, err)
 	}
 
-	indexEntries[filePath] = hash
+	indexEntries[relativePath] = hash
 
 	var newIndexContent strings.Builder
 	for path, h := range indexEntries {
-		newIndexContent.WriteString(fmt.Sprintf("%s %s\n", h, path))
+		newIndexContent.WriteString(fmt.Sprintf("%s\t%s\n", h, path))
 	}
 
 	err = os.WriteFile(indexPath, []byte(newIndexContent.String()), 0644)
@@ -133,7 +143,7 @@ func addToIndex(filePath string) (string, error) {
 		return "", fmt.Errorf("erro ao atualizar o índice '%s': %w", indexPath, err)
 	}
 
-	fmt.Printf("'%s' adicionado ao índice\n", filePath)
+	fmt.Printf("'%s' adicionado ao índice\n", relativePath)
 	return hash, nil
 }
 
@@ -151,24 +161,26 @@ func commitChanges(message string) error {
 		return fmt.Errorf("erro ao ler o índice '%s': %w", indexPath, err)
 	}
 
-	commitId := sha1.New()
-	commitId.Write([]byte(message))
-	commitId.Write(indexContent)
-	commitId.Write([]byte(time.Now().Format(time.RFC3339Nano)))
-
-	commitHash := hex.EncodeToString(commitId.Sum(nil))
-
-	commitContent := fmt.Sprintf(
-		"commit %s\n"+
-			"date: %s\n"+
-			"\n"+
-			"	%s\n"+
-			"\n"+
-			"arquivos staged (do índice):\n%s",
-		commitHash,
-		time.Now().Format(time.RFC3339),
+	commitTimestamp := time.Now().Format(time.RFC3339)
+	tempCommitContent := fmt.Sprintf(
+		"data: %s\n"+
+				"\n"+
+				"	%s\n"+
+				"\n"+
+				"arquivos staged (do índice):\n%s",
+		commitTimestamp,
 		message,
 		string(indexContent),
+	)
+
+	hasher := sha1.New()
+	hasher.Write([]byte(tempCommitContent))
+	commitHash := hex.EncodeToString(hasher.Sum(nil))
+
+	commitContent := fmt.Sprintf(
+		"commit %s\n%s",
+		commitHash,
+		tempCommitContent,
 	)
 
 	commitPath := filepath.Join(getCommitsDirPath(), commitHash)
