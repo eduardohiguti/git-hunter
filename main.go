@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,9 +12,9 @@ import (
 )
 
 const (
-	hunterRootDir = ".hunter"
-	repoObjectsDir = "objects"
-	repoCommitsDir = "commits"
+	hunterRootDir   = ".hunter"
+	repoObjectsDir  = "objects"
+	repoCommitsDir  = "commits"
 	hunterIndexFile = "index"
 )
 
@@ -30,8 +31,6 @@ func getIndexPath() string {
 }
 
 func initRepo() error {
-	fmt.Printf("Inicializando repositório Hunter em '%s'\n", hunterRootDir)
-
 	err := os.MkdirAll(hunterRootDir, 0755)
 	if err != nil {
 		return fmt.Errorf("erro ao criar diretório raiz do Hunter '%s': %w", hunterRootDir, err)
@@ -57,7 +56,11 @@ func initRepo() error {
 		return fmt.Errorf("erro ao verificar arquivo de índice '%s': %w", indexPath, err)
 	}
 
-	fmt.Println("Repositório Hunter inicializado com sucesso!")
+	absPath, err := filepath.Abs(hunterRootDir)
+	if err != nil {
+		return fmt.Errorf("erro ao obter caminho absoluto: %w", err)
+	}
+	fmt.Printf("Repositório Hunter inicializado em %s", absPath)
 	return nil
 }
 
@@ -86,11 +89,11 @@ func addToIndex(filePath string) (string, error) {
 	if _, err := os.Stat(objectPath); os.IsNotExist(err) {
 		err = os.WriteFile(objectPath, content, 0644)
 		if err != nil {
-			return "", fmt.Errorf("erro ao salvar objeto no índice '%s': %w", objectPath,err)
+			return "", fmt.Errorf("erro ao salvar objeto no índice '%s': %w", objectPath, err)
 		}
 		fmt.Printf("'%s' salvo com hash: %s\n", filePath, hash)
 	} else if err != nil {
-		return "", fmt.Errorf("erro ao verificar objeto '%s': %w", objectPath,err)
+		return "", fmt.Errorf("erro ao verificar objeto '%s': %w", objectPath, err)
 	} else {
 		fmt.Printf("'%s' já existe no índice. Não regravado\n", filePath)
 	}
@@ -108,7 +111,7 @@ func addToIndex(filePath string) (string, error) {
 			}
 		}
 	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("erro ao ler o arquivo do índice '%s': %w", indexPath,err)
+		return "", fmt.Errorf("erro ao ler o arquivo do índice '%s': %w", indexPath, err)
 	}
 
 	indexEntries[filePath] = hash
@@ -120,7 +123,7 @@ func addToIndex(filePath string) (string, error) {
 
 	err = os.WriteFile(indexPath, []byte(newIndexContent.String()), 0644)
 	if err != nil {
-		return "", fmt.Errorf("erro ao atualizar o índice '%s': %w", indexPath,err)
+		return "", fmt.Errorf("erro ao atualizar o índice '%s': %w", indexPath, err)
 	}
 
 	fmt.Printf("'%s' adicionado ao índice\n", filePath)
@@ -150,11 +153,11 @@ func commitChanges(message string) error {
 
 	commitContent := fmt.Sprintf(
 		"commit %s\n"+
-		"date: %s\n"+
-		"\n"+
-		"	%s\n"+
-		"\n"+
-		"arquivos staged (do índice):\n%s",
+			"date: %s\n"+
+			"\n"+
+			"	%s\n"+
+			"\n"+
+			"arquivos staged (do índice):\n%s",
 		commitHash,
 		time.Now().Format(time.RFC3339),
 		message,
@@ -177,10 +180,7 @@ func commitChanges(message string) error {
 	return nil
 }
 
-func main() {
-	args := os.Args[1:]
-
-	if len(args) == 0 {
+func menu() {
 		fmt.Println("Hunter é uma ferramenta para versionamento de arquivos")
 		fmt.Println()
 		fmt.Println("Uso:")
@@ -191,8 +191,17 @@ func main() {
 		fmt.Println()
 		fmt.Println("	init				Inicializa um novo repositório Hunter")
 		fmt.Println("	add				Adiciona o arquivo à área de staging")
-		fmt.Println("	commit \"<mensagem>\"		Cria um novo commit com os arquivos na área de staging")
+		fmt.Println("	commit -m \"<mensagem>\"		Cria um novo commit com os arquivos na área de staging")
 		fmt.Println()
+}
+
+func main() {
+	args := os.Args[1:]
+	commitCmd := flag.NewFlagSet("commit", flag.ExitOnError)
+	commitMessage := commitCmd.String("m", "", "Mensagem do commit (obrigatório)")
+
+	if len(args) == 0 {
+		menu()
 		return
 	}
 
@@ -215,16 +224,17 @@ func main() {
 			fmt.Println("Erro:", err)
 		}
 	case "commit":
-		if len(args) < 2 {
-			fmt.Println("Uso: commit \"<mensagem-do-commit>\"")
+		commitCmd.Parse(args[1:])
+		if *commitMessage == "" {
+			fmt.Println("Erro: a flag -m com a mensagem do commit é obrigatória")
+			fmt.Println("Uso: hunter commit -m \"sua mensagem\"")
 			return
 		}
-		commitMessage := strings.Join(args[1:], " ") 
-		err := commitChanges(commitMessage)
+		err := commitChanges(*commitMessage)
 		if err != nil {
 			fmt.Println("Erro:", err)
 		}
- 	default: 
+	default:
 		fmt.Println("Comando não reconhecido:", args[0])
 	}
 }
