@@ -12,9 +12,9 @@ import (
 
 const (
 	hunterRootDir = ".hunter"
-	repoObjectsDir = "OBJECTS"
-	repoCommitsDir = "COMMITS"
-	hunterIndexFile = "INDEX"
+	repoObjectsDir = "objects"
+	repoCommitsDir = "commits"
+	hunterIndexFile = "index"
 )
 
 func getObjectsDirPath() string {
@@ -86,13 +86,13 @@ func addToIndex(filePath string) (string, error) {
 	if _, err := os.Stat(objectPath); os.IsNotExist(err) {
 		err = os.WriteFile(objectPath, content, 0644)
 		if err != nil {
-			return "", fmt.Errorf("erro ao salvar objeto blob no repositório '%s': %w", objectPath,err)
+			return "", fmt.Errorf("erro ao salvar objeto no índice '%s': %w", objectPath,err)
 		}
-		fmt.Printf("Conteúdo do arquivo '%s' salvo como blob com hash: %s\n", filePath, hash)
+		fmt.Printf("'%s' salvo com hash: %s\n", filePath, hash)
 	} else if err != nil {
-		return "", fmt.Errorf("erro ao verificar objeto blob '%s': %w", objectPath,err)
+		return "", fmt.Errorf("erro ao verificar objeto '%s': %w", objectPath,err)
 	} else {
-		fmt.Printf("Blob para '%s' (hash: %s) já existe no repositório. Não regravado\n", filePath, hash)
+		fmt.Printf("'%s' já existe no índice. Não regravado\n", filePath)
 	}
 
 	indexPath := getIndexPath()
@@ -108,7 +108,7 @@ func addToIndex(filePath string) (string, error) {
 			}
 		}
 	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("erro ao ler o arquivo de índice '%s': %w", indexPath,err)
+		return "", fmt.Errorf("erro ao ler o arquivo do índice '%s': %w", indexPath,err)
 	}
 
 	indexEntries[filePath] = hash
@@ -123,7 +123,7 @@ func addToIndex(filePath string) (string, error) {
 		return "", fmt.Errorf("erro ao atualizar o índice '%s': %w", indexPath,err)
 	}
 
-	fmt.Printf("Arquivo '%s' (hash: %s) adicionado/atualizado no índice (Staging Area)\n", filePath, hash)
+	fmt.Printf("'%s' adicionado ao índice\n", filePath)
 	return hash, nil
 }
 
@@ -164,14 +164,14 @@ func commitChanges(message string) error {
 	commitPath := filepath.Join(getCommitsDirPath(), commitHash)
 	err = os.WriteFile(commitPath, []byte(commitContent), 0644)
 	if err != nil {
-		return fmt.Errorf("erro ao salvar objeto commit em '%s': %w", commitPath, err)
+		return fmt.Errorf("erro ao salvar commit em '%s': %w", commitPath, err)
 	}
 
 	fmt.Printf("Commit '%s' criado com sucesso. Hash: %s\n", message, commitHash)
 
 	err = os.WriteFile(indexPath, []byte{}, 0644)
 	if err != nil {
-		fmt.Printf("Aviso: erro ao limpar o arquivo de índice '%s': %v\n", indexPath, err)
+		fmt.Printf("Aviso: erro ao limpar o arquivo do índice '%s': %v\n", indexPath, err)
 	}
 
 	return nil
