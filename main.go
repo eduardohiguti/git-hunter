@@ -71,14 +71,10 @@ func checkRepoInitialized() error {
 	return nil
 }
 
-func addToIndex(filePath string) (string, error) {
-	if err := checkRepoInitialized(); err != nil {
-		return "", err
-	}
-
+func hashAndSaveObject(filePath string) (string, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return "", fmt.Errorf("erro ao ler arquivo '%s' no diretório de trabalho: %w", filePath, err)
+		return "", fmt.Errorf("erro ao ler arquivo %s: %w", filePath, err)
 	}
 
 	hasher := sha1.New()
@@ -89,14 +85,25 @@ func addToIndex(filePath string) (string, error) {
 	if _, err := os.Stat(objectPath); os.IsNotExist(err) {
 		err = os.WriteFile(objectPath, content, 0644)
 		if err != nil {
-			return "", fmt.Errorf("erro ao salvar objeto no índice '%s': %w", objectPath, err)
+			return "", fmt.Errorf("erro ao salvar objeto %s: %w", objectPath, err)
+		} else if err != nil {
+			return "", fmt.Errorf("erro ao verificar objeto %s: %w", objectPath, err)
 		}
-		fmt.Printf("'%s' salvo com hash: %s\n", filePath, hash)
-	} else if err != nil {
-		return "", fmt.Errorf("erro ao verificar objeto '%s': %w", objectPath, err)
-	} else {
-		fmt.Printf("'%s' já existe no índice. Não regravado\n", filePath)
 	}
+
+	return hash, nil
+}
+
+func addToIndex(filePath string) (string, error) {
+	if err := checkRepoInitialized(); err != nil {
+		return "", err
+	}
+
+	hash, err := hashAndSaveObject(filePath)
+	if err != nil {
+		return "", err
+	}
+	fmt.Printf("%s salvo com hash: %s\n", filePath, hash)
 
 	indexPath := getIndexPath()
 	indexEntries := make(map[string]string)
@@ -211,7 +218,8 @@ func main() {
 	case "init":
 		err := initRepo()
 		if err != nil {
-			fmt.Println("Erro:", err)
+			fmt.Fprintf(os.Stderr, "Erro: %v\n", err)
+			os.Exit(1)
 		}
 	case "add":
 		if len(args) < 2 {
@@ -221,7 +229,8 @@ func main() {
 		filePath := args[1]
 		_, err := addToIndex(filePath)
 		if err != nil {
-			fmt.Println("Erro:", err)
+			fmt.Fprintf(os.Stderr, "Erro: %v\n", err)
+			os.Exit(1)
 		}
 	case "commit":
 		commitCmd.Parse(args[1:])
@@ -232,7 +241,8 @@ func main() {
 		}
 		err := commitChanges(*commitMessage)
 		if err != nil {
-			fmt.Println("Erro:", err)
+			fmt.Fprintf(os.Stderr, "Erro: %v\n", err)
+			os.Exit(1)
 		}
 	default:
 		fmt.Println("Comando não reconhecido:", args[0])
