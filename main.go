@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -76,6 +77,63 @@ func getHeadCommitHash() (string, error) {
 func updateHeadCommitHash(hash string) error {
 	return os.WriteFile(getHeadPath(), []byte(hash), 0644)
 }
+
+func getIndexFiles() (map[string]string, error) {
+	indexEntries := make(map[string]string)
+	indexPath := getIndexPath()
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return indexEntries, nil
+		}
+		return nil, err
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) == 2 {
+			indexEntries[parts[1]] = parts[0]
+		}
+	}
+
+	return indexEntries, nil
+
+}
+
+func getCommitFiles(commitHash string) (map[string]string, error) {
+	commitFiles := make(map[string]string)
+	if commitHash == "" {
+		return commitFiles, nil
+	}
+
+	commitPath := filepath.Join(getCommitsDirPath(), commitHash)
+	data, err := os.ReadFile(commitPath)
+	if err != nil {
+		return nil, fmt.Errorf("não foi possível ler o commit %s: %w", commitHash, err)
+	}
+
+	content := string(data)
+	fileSectionIndex := strings.Index(content, "arquivos staged (do índice):\n")
+	if fileSectionIndex == -1 {
+		return commitFiles, nil
+	}
+
+	fileSection := content[fileSectionIndex+len("arquivos staged (do índice):\n"):]
+	for _, line := range strings.Split(strings.TrimSpace(fileSection), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) == 2 {
+			commitFiles[parts[1]] = parts[0]
+		}
+	}
+
+	return commitFiles, nil
+} 
 
 func initRepo() error {
 	cwd, _ := os.Getwd()
@@ -251,6 +309,159 @@ func commitChanges(message string) error {
 	return nil
 }
 
+func fileHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha1.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil	
+}
+
+func showStatus() error {
+	if err := ensureRepo(); err != nil {
+		return err
+	}
+
+	headHash, err := getHeadCommitHash()
+	if err != nil {
+		return err
+	}
+
+	headFiles, err := getCommitFiles(headHash)
+	if err != nil {
+		return err
+	}
+
+	indexFiles, err := getIndexFiles()
+	if err != nil {
+		return err
+	}
+
+	var stagedNew, stagedModified, stagedDeleted []string
+	var unstagedModified, unstagedDeleted []string
+	var untracked []string
+
+	allPaths := make(map[string]bool)
+	for path := range headFiles {
+		allPaths[path] = true
+	}
+	for path := range indexFiles {
+		allPaths[path] = true
+	}
+
+	err = filepath.Walk(repoRoot, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, relErr := filepath.Rel(repoRoot, path)
+		if relErr != nil {
+			return relErr
+		}
+		allPaths[rel] = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	sortedPaths := make([]string, 0, len(allPaths))
+	for path := range allPaths {
+		sortedPaths = append(sortedPaths, path)
+	}
+	sort.Strings(sortedPaths)
+
+	for _, path := range sortedPaths {
+		headHash, inHead := headFiles[path]
+		indexHash, inIndex := indexFiles[path]
+
+		absPath := getRepoPath(path)
+		_, statErr := os.Stat(absPath)
+		fileInWorkDir := !os.IsNotExist(statErr)
+
+		var workDirHash string 
+		if fileInWorkDir {
+			workDirHash, err = fileHash(absPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Erro ao calcular hash de %s: %v\n", absPath, err)
+			}
+		}
+
+		if inHead != inIndex || headHash != indexHash {
+			if !inHead && inIndex {
+				stagedNew = append(stagedNew, path)
+			} else if inHead && !inIndex {
+				stagedDeleted = append(stagedDeleted, path)
+			} else {
+				stagedModified = append(stagedModified, path)
+			}
+		}
+
+		if inIndex {
+			if !fileInWorkDir {
+				unstagedDeleted = append(unstagedDeleted, path)
+			} else if indexHash != workDirHash {
+				unstagedModified = append(unstagedModified, path)
+			}
+		} else if fileInWorkDir {
+			untracked = append(untracked, path)
+		}
+	}
+
+	fmt.Println("Status do repositório Hunter:")
+
+	if len(stagedNew) == 0 && len(stagedModified) == 0 && len(stagedDeleted) == 0 {
+		fmt.Println("\nNenhuma mudança na área de staging")
+	} else {
+		fmt.Println("\nMudanças a serem commitadas:")
+		for _, f := range stagedNew {
+			fmt.Printf("	%-12s %s\n", "novo arquivo:", f)
+		}
+		for _, f := range stagedModified {
+			fmt.Printf("	%-12s %s\n", "modificado:", f)
+		}
+		for _, f := range stagedDeleted {
+			fmt.Printf("	%-12s %s\n", "deletado:", f)
+		}
+	}
+
+	if len(unstagedModified) > 0 || len(unstagedDeleted) > 0 {
+		fmt.Println("\nMudanças não preparadas para commit:")
+		fmt.Println("	(use \"hunter add <arquivo>...\" para preparar para commit)")
+		for _, f := range unstagedModified {
+			fmt.Printf("	%-12s %s\n", "modificado:", f)
+		}
+		for _, f := range unstagedDeleted {
+			fmt.Printf("	%-12s %s\n", "deletado:", f)
+		}
+	}
+
+	if len(untracked) > 0 {
+		fmt.Println("\nArquivos não rastreados:")
+		fmt.Println("	(use \"hunter add <arquivo>...\" para incluir no que será commitado)")
+		for _, f := range untracked {
+			fmt.Printf("	%s\n", f)
+		}
+	}
+
+	if len(stagedNew) == 0 && len(stagedModified) == 0 && len(stagedDeleted) == 0 && len(unstagedModified) == 0 && len(unstagedDeleted) == 0 && len(untracked) == 0 {
+		fmt.Println("\nNada a commitar, diretório de trabalho limpo")
+	}
+
+	return nil
+}
+
 func menu() {
 		fmt.Println("Hunter é uma ferramenta para versionamento de arquivos")
 		fmt.Println()
@@ -263,6 +474,7 @@ func menu() {
 		fmt.Println("	init				Inicializa um novo repositório Hunter")
 		fmt.Println("	add				Adiciona o arquivo à área de staging")
 		fmt.Println("	commit -m \"<mensagem>\"		Cria um novo commit com os arquivos na área de staging")
+		fmt.Println("	status				Mostra o status do repositório")
 		fmt.Println()
 }
 
@@ -301,6 +513,11 @@ func main() {
 			return
 		}
 		if err := commitChanges(*commitMessage); err != nil {
+			fmt.Fprintf(os.Stderr, "Erro: %v\n", err)
+			os.Exit(1)
+		}
+	case "status":
+		if err := showStatus(); err != nil {
 			fmt.Fprintf(os.Stderr, "Erro: %v\n", err)
 			os.Exit(1)
 		}
