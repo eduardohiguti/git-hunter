@@ -3,10 +3,13 @@ package main
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -18,184 +21,233 @@ const (
 	hunterIndexFile = "index"
 )
 
+var repoRoot string
+
+func findRepoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		candidate := filepath.Join(dir, hunterRootDir)
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return filepath.Abs(dir)
+		}
+		master := filepath.Dir(dir)
+		if master == dir {
+			break
+		}
+		dir = master
+	}
+	return "", fmt.Errorf("repositório Hunter não inicializado. Use 'hunter init' primeiro")
+}
+
+func getRepoPath(sub ...string) string {
+	return filepath.Join(append([]string{repoRoot}, sub...)...)
+}
+
 func getObjectsDirPath() string {
-	return filepath.Join(hunterRootDir, repoObjectsDir)
+	return getRepoPath(hunterRootDir, repoObjectsDir)
 }
 
 func getCommitsDirPath() string {
-	return filepath.Join(hunterRootDir, repoCommitsDir)
+	return getRepoPath(hunterRootDir, repoCommitsDir)
 }
 
 func getIndexPath() string {
-	return filepath.Join(hunterRootDir, hunterIndexFile)
+	return getRepoPath(hunterRootDir, hunterIndexFile)
+}
+
+func getHeadPath() string {
+	return getRepoPath(hunterRootDir, "HEAD")
+}
+
+func getHeadCommitHash() (string, error) {
+	content, err := os.ReadFile(getHeadPath())
+	if os.IsNotExist((err)) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("erro ao ler o HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(content)), nil
+}
+
+func updateHeadCommitHash(hash string) error {
+	return os.WriteFile(getHeadPath(), []byte(hash), 0644)
 }
 
 func initRepo() error {
-	err := os.MkdirAll(hunterRootDir, 0755)
-	if err != nil {
-		return fmt.Errorf("erro ao criar diretório raiz do Hunter '%s': %w", hunterRootDir, err)
-	}
+	cwd, _ := os.Getwd()
+	repoRoot = cwd
 
-	err = os.MkdirAll(getObjectsDirPath(), 0755)
-	if err != nil {
-		return fmt.Errorf("erro ao criar diretório de objetos '%s': %w", getObjectsDirPath(), err)
+	hunterRoot := filepath.Join(repoRoot, hunterRootDir)
+	if err := os.MkdirAll(filepath.Join(hunterRoot, repoObjectsDir), 0755); err != nil {
+		return err
 	}
-
-	err = os.MkdirAll(getCommitsDirPath(), 0755)
-	if err != nil {
-		return fmt.Errorf("erro ao criar diretório de commits '%s': %w", getCommitsDirPath(), err)
+	if err := os.MkdirAll(filepath.Join(hunterRoot, repoCommitsDir), 0755); err != nil {
+		return err
 	}
-
-	indexPath := getIndexPath()
+	indexPath := filepath.Join(hunterRoot, hunterIndexFile)
 	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
-		_, err := os.Create(indexPath)
+		f, err := os.Create(indexPath)
 		if err != nil {
-			return fmt.Errorf("erro ao criar arquivo de índice '%s': %w", indexPath, err)
+			return err
 		}
-	} else if err != nil {
-		return fmt.Errorf("erro ao verificar arquivo de índice '%s': %w", indexPath, err)
+		f.Close()
 	}
 
-	absPath, err := filepath.Abs(hunterRootDir)
-	if err != nil {
-		return fmt.Errorf("erro ao obter caminho absoluto: %w", err)
-	}
-	fmt.Printf("Repositório Hunter inicializado em %s", absPath)
+	absPath, _ := filepath.Abs(hunterRoot)
+	fmt.Printf("Repositório Hunter inicializado em %s\n", absPath)
 	return nil
 }
 
-func checkRepoInitialized() error {
-	if _, err := os.Stat(hunterRootDir); os.IsNotExist(err) {
-		return fmt.Errorf("repositório Hunter não inicializado. Use 'hunter init' primeiro")
+func ensureRepo() error {
+	if repoRoot != "" {
+		return nil
 	}
+	root, err := findRepoRoot()
+	if err != nil {
+		return err
+	}
+	repoRoot = root
 	return nil
 }
 
-func hashAndSaveObject(filePath string) (string, error) {
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", fmt.Errorf("erro ao ler arquivo %s: %w", filePath, err)
-	}
+func hashAndSaveObject(absPath string) (string, error) {
+    content, err := os.ReadFile(absPath)
+    if err != nil {
+        return "", err
+    }
+    hasher := sha1.New()
+    hasher.Write(content)
+    hash := hex.EncodeToString(hasher.Sum(nil))
 
-	hasher := sha1.New()
-	hasher.Write(content)
-	hash := hex.EncodeToString(hasher.Sum(nil))
+    objectPath := filepath.Join(getObjectsDirPath(), hash)
+    if _, err := os.Stat(objectPath); errors.Is(err, fs.ErrNotExist) {
+        fd, err := os.OpenFile(objectPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+        if err != nil && !errors.Is(err, fs.ErrExist) {
+            return "", err
+        }
+        if err == nil {
+            _, werr := fd.Write(content)
+            fd.Close()
+            if werr != nil {
+                return "", werr
+            }
+        }
+    } else if err != nil {
+        return "", err
+    }
 
-	objectPath := filepath.Join(getObjectsDirPath(), hash)
-	if _, err := os.Stat(objectPath); os.IsNotExist(err) {
-		err = os.WriteFile(objectPath, content, 0644)
-		if err != nil {
-			return "", fmt.Errorf("erro ao salvar objeto %s: %w", objectPath, err)
-		} 
-	} else if err != nil {
-			return "", fmt.Errorf("erro ao verificar objeto %s: %w", objectPath, err)
-		}
-
-	return hash, nil
+    return hash, nil
 }
 
 func addToIndex(filePath string) (string, error) {
-	if err := checkRepoInitialized(); err != nil {
+	if err := ensureRepo(); err != nil {
 		return "", err
 	}
 
-	rootDir, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("erro ao ober o diretório de trabalho: %w", err)
-	}
-
-	relativePath, err := filepath.Rel(rootDir, filePath)
-	if err != nil {
-		return "", fmt.Errorf("erro ao calcular o caminho relativo para %s: %w", filePath, err)
-	}
-
-	hash, err := hashAndSaveObject(relativePath)
+	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return "", err
 	}
-	fmt.Printf("%s salvo com hash: %s\n", relativePath, hash)
 
-	indexPath := getIndexPath()
+	absPath, err = filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", err
+	}
+
+	rel, err := filepath.Rel(repoRoot, absPath)
+	if err != nil {
+		return "", err
+	}
+	rel = filepath.Clean(rel)
+	if strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("arquivo fora do repositório")
+	}
+
+	hash, err := hashAndSaveObject(absPath)
+	if err != nil {
+		return "", err
+	}
+	fmt.Printf("%s salvo com hash: %s\n", rel, hash)
+
 	indexEntries := make(map[string]string)
-
-	existingIndexContent, err := os.ReadFile(indexPath)
-	if err == nil {
-		lines := strings.Split(string(existingIndexContent), "\n")
-		for _, line := range lines {
-			parts := strings.SplitN(line, "\t", 2)
+	indexPath := getIndexPath()
+	if data, err := os.ReadFile(indexPath); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "/t", 2)
 			if len(parts) == 2 {
 				indexEntries[parts[1]] = parts[0]
 			}
 		}
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("erro ao ler o arquivo do índice '%s': %w", indexPath, err)
 	}
 
-	indexEntries[relativePath] = hash
+	indexEntries[rel] = hash
 
-	var newIndexContent strings.Builder
-	for path, h := range indexEntries {
-		newIndexContent.WriteString(fmt.Sprintf("%s\t%s\n", h, path))
+	paths := make([]string, 0, len(indexEntries))
+	for p := range indexEntries {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	var b strings.Builder
+	for _, p := range paths {
+		b.WriteString(fmt.Sprintf("%s\t%s\n", indexEntries[p], p))
 	}
 
-	err = os.WriteFile(indexPath, []byte(newIndexContent.String()), 0644)
-	if err != nil {
-		return "", fmt.Errorf("erro ao atualizar o índice '%s': %w", indexPath, err)
+	if err := os.WriteFile(indexPath, []byte(b.String()), 0644); err != nil {
+		return "", err
 	}
 
-	fmt.Printf("'%s' adicionado ao índice\n", relativePath)
+	fmt.Printf("'%s' adicionado ao índice\n", rel)
 	return hash, nil
 }
 
 func commitChanges(message string) error {
-	if err := checkRepoInitialized(); err != nil {
+	if err := ensureRepo(); err != nil {
 		return err
 	}
 
 	indexPath := getIndexPath()
 	indexContent, err := os.ReadFile(indexPath)
-	if os.IsNotExist(err) || len(strings.TrimSpace(string(indexContent))) == 0 {
-		return fmt.Errorf("não há arquivos na área de staging para commitar. Use 'hunter add <arquivo>' primeiro")
-	}
 	if err != nil {
-		return fmt.Errorf("erro ao ler o índice '%s': %w", indexPath, err)
+		if errors.Is(err, fs.ErrNotExist) || len(strings.TrimSpace(string(indexContent))) == 0 {
+			return fmt.Errorf("não há arquivos na área de staging para commitar. Use 'hunter add <arquivo>' primeiro")
+		}
+		return err
 	}
 
+	parentHash, _ := getHeadCommitHash()
 	commitTimestamp := time.Now().Format(time.RFC3339)
-	tempCommitContent := fmt.Sprintf(
-		"data: %s\n"+
-				"\n"+
-				"	%s\n"+
-				"\n"+
-				"arquivos staged (do índice):\n%s",
-		commitTimestamp,
-		message,
-		string(indexContent),
-	)
+
+	var tempCommitContent strings.Builder
+	tempCommitContent.WriteString(fmt.Sprintf("mestre: %s\n", parentHash))
+	tempCommitContent.WriteString(fmt.Sprintf("data: %s\n\n", commitTimestamp))
+	tempCommitContent.WriteString(fmt.Sprintf("%s\n\n", message))
+	tempCommitContent.WriteString("arquivos staged (do índice):\n")
+	tempCommitContent.Write(indexContent)
 
 	hasher := sha1.New()
-	hasher.Write([]byte(tempCommitContent))
+	hasher.Write([]byte(tempCommitContent.String()))
 	commitHash := hex.EncodeToString(hasher.Sum(nil))
 
-	commitContent := fmt.Sprintf(
-		"commit %s\n%s",
-		commitHash,
-		tempCommitContent,
-	)
-
+	finalCommitContent := fmt.Sprintf("commit %s\n%s", commitHash, tempCommitContent.String())
 	commitPath := filepath.Join(getCommitsDirPath(), commitHash)
-	err = os.WriteFile(commitPath, []byte(commitContent), 0644)
-	if err != nil {
-		return fmt.Errorf("erro ao salvar commit em '%s': %w", commitPath, err)
-	}
 
+	if err := os.WriteFile(commitPath, []byte(finalCommitContent), 0644); err != nil {
+		return err
+	}
+	if err := updateHeadCommitHash(commitHash); err != nil {
+		return err
+	}
 	fmt.Printf("Commit '%s' criado com sucesso. Hash: %s\n", message, commitHash)
 
-	err = os.WriteFile(indexPath, []byte{}, 0644)
-	if err != nil {
-		fmt.Printf("Aviso: erro ao limpar o arquivo do índice '%s': %v\n", indexPath, err)
-	}
-
+	os.WriteFile(indexPath, []byte{}, 0644)
 	return nil
 }
 
@@ -217,7 +269,7 @@ func menu() {
 func main() {
 	args := os.Args[1:]
 	commitCmd := flag.NewFlagSet("commit", flag.ExitOnError)
-	commitMessage := commitCmd.String("m", "", "Mensagem do commit (obrigatório)")
+	commitMessage := commitCmd.String("m", "", "Mensagem do commit (obrigatória)")
 
 	if len(args) == 0 {
 		menu()
@@ -228,8 +280,7 @@ func main() {
 	case "oi":
 		fmt.Println("oi")
 	case "init":
-		err := initRepo()
-		if err != nil {
+		if err := initRepo(); err != nil {
 			fmt.Fprintf(os.Stderr, "Erro: %v\n", err)
 			os.Exit(1)
 		}
@@ -238,9 +289,7 @@ func main() {
 			fmt.Println("Uso: add <caminho-do-arquivo>")
 			return
 		}
-		filePath := args[1]
-		_, err := addToIndex(filePath)
-		if err != nil {
+		if _, err := addToIndex(args[1]); err != nil {
 			fmt.Fprintf(os.Stderr, "Erro: %v\n", err)
 			os.Exit(1)
 		}
@@ -251,8 +300,7 @@ func main() {
 			fmt.Println("Uso: hunter commit -m \"sua mensagem\"")
 			return
 		}
-		err := commitChanges(*commitMessage)
-		if err != nil {
+		if err := commitChanges(*commitMessage); err != nil {
 			fmt.Fprintf(os.Stderr, "Erro: %v\n", err)
 			os.Exit(1)
 		}
